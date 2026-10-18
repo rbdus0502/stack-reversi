@@ -33,4 +33,4 @@ npm run selfplay -- --games 500 --depth 3   # AI 셀프플레이 밸런스 측�
 
 `main`에 푸시하면 GitHub Actions가 테스트 → 빌드 → GitHub Pages 배포를 자동으로 합니다.
 
-© 2026 규연. All rights reserved.
+© 2026 rbdus0502. All rights reserved.
