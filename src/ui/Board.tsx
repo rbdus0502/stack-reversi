@@ -1,60 +1,134 @@
-import { useMemo, useRef, useState } from 'react';
-import { moveEffect } from '../engine/rules';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { UnitId } from '../engine/config';
 import { toNotation } from '../engine/notation';
-import type { GameState, Move, MoveEffect, Player } from '../engine/types';
-import Cell, { type Anim, type Marker, type Preview } from './Cell';
-
-export interface LastAction {
-  move: Move;
-  effect: MoveEffect;
-  /** Pre-move owners of shaved stacks, keyed by "r,c". */
-  shavedOwners: Record<string, Player>;
-  key: number;
-  /** False when we navigated history instead of playing: highlight only, no animation. */
-  animate: boolean;
-}
+import { previewMove, type MovePreview } from '../engine/preview';
+import type { GameState, Move, Piece, Pos } from '../engine/types';
+import Cell, { type CellAnim, type CellPreview, type Marker } from './Cell';
 
 interface BoardProps {
   state: GameState;
   legal: Move[];
+  unit: UnitId;
   interactive: boolean;
   showHints: boolean;
-  last: LastAction | null;
+  anims: Map<string, CellAnim>;
+  lastCells: Pos[];
   onMove: (m: Move) => void;
 }
 
-type Target = Extract<Move, { row: number }>;
+type PlaceMove = Extract<Move, { kind: 'place' }>;
+type StepMove = Extract<Move, { kind: 'move' }>;
 
-export default function Board({ state, legal, interactive, showHints, last, onMove }: BoardProps) {
+const key = (r: number, c: number) => `${r},${c}`;
+const sameTarget = (a: Move | null, b: Move | null) =>
+  !!a && !!b && a.kind !== 'pass' && b.kind !== 'pass' && a.kind === b.kind && a.row === b.row && a.col === b.col;
+
+export default function Board({ state, legal, unit, interactive, showHints, anims, lastCells, onMove }: BoardProps) {
   const n = state.board.length;
-  const [hover, setHover] = useState<Target | null>(null);
-  const [selected, setSelected] = useState<Target | null>(null);
+  const [hover, setHover] = useState<Pos | null>(null);
+  const [movingFrom, setMovingFrom] = useState<Pos | null>(null);
+  /** Touch: the move previewed by the first tap, confirmed by the second. */
+  const [armed, setArmed] = useState<Move | null>(null);
   const pointerType = useRef<string>('mouse');
 
-  const byCell = useMemo(() => {
-    const map = new Map<string, Target>();
-    if (interactive) for (const m of legal) if (m.kind !== 'pass') map.set(`${m.row},${m.col}`, m);
-    return map;
+  // Reset transient selection whenever the position or the chosen unit changes.
+  useEffect(() => {
+    setMovingFrom(null);
+    setArmed(null);
+  }, [state, unit, interactive]);
+
+  const places = useMemo(() => {
+    const m = new Map<string, PlaceMove>();
+    if (interactive) for (const mv of legal) if (mv.kind === 'place' && mv.unit === unit) m.set(key(mv.row, mv.col), mv);
+    return m;
+  }, [legal, unit, interactive]);
+
+  const stepsByFrom = useMemo(() => {
+    const m = new Map<string, StepMove[]>();
+    if (!interactive) return m;
+    for (const mv of legal) {
+      if (mv.kind !== 'move') continue;
+      const k = key(mv.fromRow, mv.fromCol);
+      m.set(k, [...(m.get(k) ?? []), mv]);
+    }
+    return m;
   }, [legal, interactive]);
 
-  // Selected (touch) takes priority over hover (mouse).
-  const focus = selected && byCell.has(`${selected.row},${selected.col}`) ? selected : hover;
-  const effect = useMemo(() => (focus ? moveEffect(state, focus) : null), [focus, state]);
+  const steps = useMemo(() => {
+    const m = new Map<string, StepMove>();
+    if (movingFrom) for (const s of stepsByFrom.get(key(movingFrom.row, movingFrom.col)) ?? []) m.set(key(s.row, s.col), s);
+    return m;
+  }, [movingFrom, stepsByFrom]);
 
-  const preview = new Map<string, Preview>();
-  if (effect) {
-    for (const f of effect.flips) preview.set(`${f.row},${f.col}`, 'flip');
-    for (const s of effect.shaves) preview.set(`${s.row},${s.col}`, 'shave');
+  const moveAt = (r: number, c: number): Move | null => (movingFrom ? steps.get(key(r, c)) : places.get(key(r, c))) ?? null;
+
+  const focus: Move | null = armed ?? (hover ? moveAt(hover.row, hover.col) : null);
+  const pv: MovePreview | null = useMemo(() => (focus ? previewMove(state, focus) : null), [focus, state]);
+
+  const cellPv = new Map<string, CellPreview>();
+  const anchors = new Set<string>();
+  const shots = new Set<string>();
+  if (pv) {
+    for (const ch of pv.changes) cellPv.set(key(ch.row, ch.col), ch);
+    for (const a of pv.anchors) anchors.add(key(a.row, a.col));
+    for (const s of pv.shots) shots.add(key(s.to.row, s.to.col));
   }
 
-  const anims = new Map<string, Anim>();
-  if (last && last.animate && last.move.kind !== 'pass') {
-    anims.set(`${last.move.row},${last.move.col}`, last.move.kind);
-    for (const f of last.effect.flips) anims.set(`${f.row},${f.col}`, 'flip');
-    for (const s of last.effect.shaves) anims.set(`${s.row},${s.col}`, 'shave');
+  let ghost: { at: string; piece: Piece } | null = null;
+  if (focus && focus.kind === 'place') {
+    ghost = { at: key(focus.row, focus.col), piece: { owner: state.turn, unit: focus.unit, hp: state.config.UNITS[focus.unit].maxHp } };
+  } else if (focus && focus.kind === 'move') {
+    ghost = { at: key(focus.row, focus.col), piece: state.board[focus.fromRow][focus.fromCol] as Piece };
   }
 
+  const lastSet = new Set(lastCells.map((p) => key(p.row, p.col)));
   const files = Array.from({ length: n }, (_, i) => String.fromCharCode(97 + i));
+
+  const handleClick = (r: number, c: number, e: React.MouseEvent) => {
+    if (!interactive) return;
+    const k = key(r, c);
+    const isTouch = e.detail !== 0 && pointerType.current !== 'mouse';
+    const target = moveAt(r, c);
+    if (target) {
+      // Touch (and keyboard-less taps): first tap previews, second confirms.
+      if (isTouch && !sameTarget(armed, target)) {
+        setArmed(target);
+        return;
+      }
+      setArmed(null);
+      setMovingFrom(null);
+      setHover(null);
+      onMove(target);
+      return;
+    }
+    setArmed(null);
+    if (movingFrom && movingFrom.row === r && movingFrom.col === c) {
+      setMovingFrom(null);
+      return;
+    }
+    if (stepsByFrom.has(k)) {
+      setMovingFrom({ row: r, col: c });
+      return;
+    }
+    if (movingFrom) {
+      setMovingFrom(null);
+      // Allow a direct switch back to placing on the same tap.
+      const p = places.get(k);
+      if (p && !isTouch) onMove(p);
+      else if (p) setArmed(p);
+    }
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMovingFrom(null);
+        setArmed(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   return (
     <div className="board-wrap" onPointerLeave={() => setHover(null)}>
@@ -68,48 +142,43 @@ export default function Board({ state, legal, interactive, showHints, last, onMo
           <span key={i}>{i + 1}</span>
         ))}
       </div>
-      <div className="board" role="grid" style={{ '--n': n } as React.CSSProperties}>
+      <div className={`board${movingFrom ? ' is-moving' : ''}`} role="grid" style={{ '--n': n } as React.CSSProperties}>
         {state.board.map((row, r) =>
-          row.map((cell, c) => {
-            const k = `${r},${c}`;
-            const move = byCell.get(k) ?? null;
-            const marker: Marker = move && (showHints || move.kind === 'stack') ? move.kind : null;
-            const isFocus = !!focus && focus.row === r && focus.col === c;
+          row.map((piece, c) => {
+            const k = key(r, c);
+            const placeMv = !movingFrom ? places.get(k) : undefined;
+            const stepMv = movingFrom ? steps.get(k) : undefined;
+            const canMoveFrom = !movingFrom && stepsByFrom.has(k);
+            let marker: Marker = null;
+            if (stepMv) marker = 'target';
+            else if (placeMv && showHints) marker = 'place';
+            else if (canMoveFrom && showHints) marker = 'movable';
+            const isFrom = !!movingFrom && movingFrom.row === r && movingFrom.col === c;
             return (
               <Cell
                 key={k}
-                cell={cell}
+                piece={piece}
                 label={toNotation(r, c)}
-                marker={marker}
-                playable={!!move}
-                preview={preview.get(k) ?? null}
-                ghost={isFocus && move?.kind === 'place' ? state.turn : null}
-                selected={!!selected && selected.row === r && selected.col === c}
-                focus={isFocus && !!move}
-                last={!!last && last.move.kind !== 'pass' && last.move.row === r && last.move.col === c}
-                anim={anims.get(k) ?? null}
-                animKey={last?.key ?? 0}
+                cfg={state.config}
                 turn={state.turn}
-                shavedOwner={last?.shavedOwners[k] ?? null}
+                marker={marker}
+                playable={!!placeMv || !!stepMv || stepsByFrom.has(k) || isFrom}
+                ghost={ghost?.at === k ? ghost.piece : null}
+                movingFrom={isFrom}
+                selected={!!armed && armed.kind !== 'pass' && armed.row === r && armed.col === c}
+                anchor={anchors.has(k)}
+                shot={shots.has(k)}
+                preview={cellPv.get(k) ?? null}
+                last={lastSet.has(k)}
+                anim={anims.get(k) ?? null}
+                arrow={stepMv && movingFrom ? { dx: c - movingFrom.col, dy: r - movingFrom.row } : null}
                 onPointerDown={(e) => {
                   pointerType.current = e.pointerType;
                 }}
                 onPointerEnter={(e) => {
-                  if (e.pointerType === 'mouse') setHover(move);
+                  if (e.pointerType === 'mouse') setHover({ row: r, col: c });
                 }}
-                onClick={(e) => {
-                  if (!move) return;
-                  // detail === 0 means keyboard activation: always confirm.
-                  const isTouch = e.detail !== 0 && pointerType.current !== 'mouse';
-                  // Touch: first tap previews, second tap on the same cell confirms.
-                  if (isTouch && !(selected && selected.row === r && selected.col === c)) {
-                    setSelected(move);
-                    return;
-                  }
-                  setSelected(null);
-                  setHover(null);
-                  onMove(move);
-                }}
+                onClick={(e) => handleClick(r, c, e)}
               />
             );
           }),

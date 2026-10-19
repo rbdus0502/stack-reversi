@@ -1,145 +1,176 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DEFAULT_CONFIG,
   applyMove,
-  emptyBoard,
-  fromNotation,
   initialState,
   isGameOver,
   isLegal,
   legalMoves,
+  placeableCells,
   score,
   toNotation,
   type GameState,
   type Move,
-  type Player,
 } from '../src/engine';
+import { at, move, place, rng, setup } from './helpers';
 
-/** Build a state from a map like { a1: 'B1', b1: 'W2' }. Black to move, 5 tokens each by default. */
-function setup(cells: Record<string, string>, opts: Partial<Pick<GameState, 'turn' | 'tokens'>> = {}): GameState {
-  const board = emptyBoard(DEFAULT_CONFIG.BOARD_SIZE);
-  for (const [sq, v] of Object.entries(cells)) {
-    const { row, col } = fromNotation(sq);
-    board[row][col] = { owner: v[0] as Player, height: Number(v.slice(1)) };
-  }
-  return {
-    board,
-    turn: opts.turn ?? 'B',
-    tokens: opts.tokens ?? { B: DEFAULT_CONFIG.STACK_TOKENS, W: DEFAULT_CONFIG.STACK_TOKENS },
-    passes: 0,
-    config: DEFAULT_CONFIG,
-  };
-}
-
-function at(state: GameState, sq: string): string {
-  const { row, col } = fromNotation(sq);
-  const c = state.board[row][col];
-  return c ? `${c.owner}${c.height}` : '·';
-}
-
-function names(moves: Move[], kind: 'place' | 'stack'): string[] {
+function placesOf(moves: Move[]): string[] {
   return moves
-    .filter((m): m is Extract<Move, { row: number }> => m.kind === kind)
-    .map((m) => toNotation(m.row, m.col))
+    .filter((m): m is Extract<Move, { kind: 'place' }> => m.kind === 'place')
+    .map((m) => `${toNotation(m.row, m.col)}:${m.unit}`)
     .sort();
 }
 
-function mv(kind: 'place' | 'stack', sq: string): Move {
-  return { kind, ...fromNotation(sq) };
+function movesOf(moves: Move[]): string[] {
+  return moves
+    .filter((m): m is Extract<Move, { kind: 'move' }> => m.kind === 'move')
+    .map((m) => `${toNotation(m.fromRow, m.fromCol)}>${toNotation(m.row, m.col)}`)
+    .sort();
 }
 
 describe('RULES.md section 9', () => {
-  it('T1: opening moves for black', () => {
-    const moves = legalMoves(initialState());
-    expect(names(moves, 'place')).toEqual(['c4', 'd3', 'e6', 'f5']);
-    expect(names(moves, 'stack')).toEqual([]);
+  it('T1: opening moves', () => {
+    const ms = legalMoves(initialState());
+    const places = placesOf(ms);
+    expect(places).toHaveLength(16);
+    expect([...new Set(places.map((p) => p.split(':')[0]))].sort()).toEqual(['c4', 'd3', 'e6', 'f5']);
+    expect(movesOf(ms)).toEqual(['d5>c4', 'd5>e6', 'e4>d3', 'e4>f5']);
   });
 
-  it('T2: stacking is legal on both ends of a sandwich', () => {
-    const s = setup({ a1: 'B1', b1: 'W1', c1: 'B1' });
-    expect(names(legalMoves(s), 'stack')).toEqual(['a1', 'c1']);
+  it('T2: soldier + soldier anchor deals 2', () => {
+    const s = applyMove(setup({ a1: 'B병', b1: 'W방' }), place('soldier', 'c1'));
+    expect(at(s, 'b1')).toBe('W방1');
   });
 
-  it('T2b: stacking on c1 flips b1 and spends a token', () => {
-    const s = setup({ a1: 'B1', b1: 'W1', c1: 'B1' });
-    const next = applyMove(s, mv('stack', 'c1'));
-    expect([at(next, 'a1'), at(next, 'b1'), at(next, 'c1')]).toEqual(['B1', 'B1', 'B2']);
-    expect(next.tokens.B).toBe(4);
-    // Original state is untouched.
-    expect(at(s, 'c1')).toBe('B1');
-    expect(s.tokens.B).toBe(5);
+  it('T3: lancer + lancer anchor breaks a guard into a token', () => {
+    const s = applyMove(setup({ a1: 'B창', b1: 'W방' }), place('lancer', 'c1'));
+    expect(at(s, 'b1')).toBe('B토');
+    expect(s.supply.B.lancer).toBe(2);
   });
 
-  it('T3: a tall stack loses a layer instead of flipping', () => {
-    const next = applyMove(setup({ a1: 'B1', b1: 'W2' }), mv('place', 'c1'));
-    expect([at(next, 'b1'), at(next, 'c1')]).toEqual(['W1', 'B1']);
+  it('T4: zero damage is still a legal move and leaves a unit untouched', () => {
+    const s0 = setup({ a1: 'B토', b1: 'W방' });
+    expect(isLegal(s0, place('guard', 'c1'))).toBe(true);
+    expect(at(applyMove(s0, place('guard', 'c1')), 'b1')).toBe('W방3');
   });
 
-  it('T4: mixed heights in one line', () => {
-    const next = applyMove(setup({ a1: 'B1', b1: 'W1', c1: 'W2' }), mv('place', 'd1'));
-    expect([at(next, 'b1'), at(next, 'c1'), at(next, 'd1')]).toEqual(['B1', 'W1', 'B1']);
+  it('T5: tokens flip even on zero damage', () => {
+    const s = applyMove(setup({ a1: 'B토', b1: 'W토' }), place('guard', 'c1'));
+    expect(at(s, 'b1')).toBe('B토');
   });
 
-  it('T5: sandwich is evaluated once on the pre-move board', () => {
-    const next = applyMove(setup({ a1: 'B1', b1: 'W2', c1: 'W1' }), mv('place', 'd1'));
-    expect([at(next, 'b1'), at(next, 'c1'), at(next, 'd1')]).toEqual(['W1', 'B1', 'B1']);
+  it('T6: damage differs per line by anchor', () => {
+    const s = applyMove(setup({ a3: 'B창', b3: 'W병', c1: 'B토', c2: 'W방' }), place('soldier', 'c3'));
+    expect(at(s, 'b3')).toBe('B토');
+    expect(at(s, 'c2')).toBe('W방2');
   });
 
-  it('T6: max-height stack cannot be stacked', () => {
-    const moves = legalMoves(setup({ a1: 'B1', b1: 'W1', c1: 'W1', d1: 'B3' }));
-    expect(names(moves, 'stack')).toEqual(['a1']);
-    expect(names(moves, 'place')).toEqual([]);
+  it('T7: tokens and units in one line are handled individually', () => {
+    const s = applyMove(setup({ a1: 'B병', b1: 'W토', c1: 'W방' }), place('soldier', 'd1'));
+    expect(at(s, 'b1')).toBe('B토');
+    expect(at(s, 'c1')).toBe('W방1');
   });
 
-  it('T7: no tokens means no stacking, so black must pass', () => {
-    const s = setup({ a1: 'B1', b1: 'W1', c1: 'B1' }, { tokens: { B: 0, W: 5 } });
+  it('T8: moving adds the charge bonus and spends a ticket', () => {
+    const s = applyMove(setup({ c3: 'B창', e3: 'W방', f3: 'B병' }), move('c3', 'd3'));
+    expect(at(s, 'c3')).toBe('·');
+    expect(at(s, 'd3')).toBe('B창1');
+    expect(at(s, 'e3')).toBe('B토');
+    expect(s.moveTickets.B).toBe(2);
+  });
+
+  it('T9: tokens cannot move', () => {
+    expect(movesOf(legalMoves(setup({ c3: 'B토', e3: 'W병', f3: 'B병' })))).toEqual([]);
+  });
+
+  it('T10: no tickets, no moves', () => {
+    const s = setup({ c3: 'B병', e3: 'W병', f3: 'B병' }, { moveTickets: { B: 0, W: 3 } });
+    const ms = legalMoves(s);
+    expect(movesOf(ms)).toEqual([]);
+    expect(placesOf(ms)).toEqual(['d3:guard', 'd3:lancer', 'd3:soldier', 'd3:tower']);
+  });
+
+  it('T11: a moved turret fires from its new square', () => {
+    const s = applyMove(setup({ c3: 'B포', e3: 'W병', f3: 'B병', d4: 'W병', d2: 'W방' }), move('c3', 'd3'));
+    expect(at(s, 'e3')).toBe('B토');
+    expect(at(s, 'd4')).toBe('B토');
+    expect(at(s, 'd2')).toBe('W방2');
+  });
+
+  it('T12: a just-placed turret does not fire', () => {
+    const s = applyMove(setup({ a1: 'B병', b1: 'W병', c2: 'W병' }), place('tower', 'c1'));
+    expect(at(s, 'b1')).toBe('B토');
+    expect(at(s, 'c1')).toBe('B포2');
+    expect(at(s, 'c2')).toBe('W병1');
+  });
+
+  it('T13: turrets flip tokens; diagonals are out of range', () => {
+    const s = applyMove(setup({ a1: 'B포', a2: 'W토', b2: 'W병', d1: 'B병', e1: 'W병' }), place('soldier', 'f1'));
+    expect(at(s, 'e1')).toBe('B토');
+    expect(at(s, 'a2')).toBe('B토');
+    expect(at(s, 'b2')).toBe('W병1');
+  });
+
+  it('T14: line damage and turret damage stack', () => {
+    const s = applyMove(setup({ a3: 'B포', b3: 'W방' }), place('soldier', 'c3'));
+    expect(at(s, 'b3')).toBe('W방1');
+  });
+
+  it('T15: lancer + soldier anchor deals 3 to every piece in the line', () => {
+    const s = applyMove(setup({ a1: 'B병', b1: 'W방2', c1: 'W병' }), place('lancer', 'd1'));
+    expect(at(s, 'b1')).toBe('B토');
+    expect(at(s, 'c1')).toBe('B토');
+  });
+
+  it('T16: two passes end the game; ties broken by HP sum', () => {
+    let s = setup({ a1: 'B방', a8: 'B병', h1: 'W병', h8: 'W병' });
     expect(legalMoves(s)).toEqual([]);
-    expect(isLegal(s, { kind: 'pass' })).toBe(true);
-  });
-
-  it('T8: stacking on an opponent stack is rejected', () => {
-    const s = setup({ a1: 'B1', b1: 'W1', c1: 'B1' });
-    expect(isLegal(s, mv('stack', 'b1'))).toBe(false);
-    expect(() => applyMove(s, mv('stack', 'b1'))).toThrow();
-  });
-
-  it('T9: two consecutive passes end the game', () => {
-    const s = setup({ a1: 'B2', h8: 'W1' });
+    s = applyMove(s, { kind: 'pass' });
+    expect(isGameOver(s)).toBe(false);
     expect(legalMoves(s)).toEqual([]);
-    const s1 = applyMove(s, { kind: 'pass' });
-    expect(isGameOver(s1)).toBe(false);
-    expect(legalMoves(s1)).toEqual([]);
-    const s2 = applyMove(s1, { kind: 'pass' });
-    expect(isGameOver(s2)).toBe(true);
-    // Equal cell count (1:1), black height sum 2 > 1.
-    expect(score(s2).winner).toBe('B');
-  });
-
-  it('T10: cell tie broken by height sum', () => {
-    const s = setup({ a1: 'B3', b2: 'B1', g7: 'W1', h8: 'W2' });
+    s = applyMove(s, { kind: 'pass' });
+    expect(isGameOver(s)).toBe(true);
     const sc = score(s);
-    expect(sc.cells).toEqual({ B: 2, W: 2 });
-    expect(sc.heights).toEqual({ B: 4, W: 3 });
+    expect(sc.pieces).toEqual({ B: 2, W: 2 });
+    expect(sc.hp).toEqual({ B: 4, W: 2 });
     expect(sc.winner).toBe('B');
   });
-});
 
-describe('extra engine checks', () => {
-  it('voluntary pass is illegal when a move exists', () => {
-    expect(isLegal(initialState(), { kind: 'pass' })).toBe(false);
+  it('T17: units with zero supply cannot be placed', () => {
+    const s = setup({ a1: 'B병', b1: 'W병' });
+    s.supply.B.lancer = 0;
+    expect(placesOf(legalMoves(s))).toEqual(['c1:guard', 'c1:soldier', 'c1:tower']);
   });
 
-  it('a non-pass move resets the pass counter', () => {
-    const s = { ...setup({ a1: 'B1', b1: 'W1' }), passes: 1 };
-    expect(applyMove(s, mv('place', 'c1')).passes).toBe(0);
+  it('T18: voluntary pass is rejected', () => {
+    const s = initialState();
+    expect(isLegal(s, { kind: 'pass' })).toBe(false);
+    expect(() => applyMove(s, { kind: 'pass' })).toThrow();
   });
 
-  it('a full draw', () => {
-    expect(score(setup({ a1: 'B2', h8: 'W2' })).winner).toBe('draw');
-  });
-
-  it('state is JSON-serializable', () => {
-    const s = applyMove(initialState(), mv('place', 'd3'));
-    expect(JSON.parse(JSON.stringify(s))).toEqual(s);
+  it('T19: 1,000 random plies keep invariants', () => {
+    const r = rng(19);
+    let s: GameState = initialState();
+    let plies = 0;
+    let movesSeen = 0;
+    while (plies < 1000) {
+      if (isGameOver(s)) {
+        s = initialState();
+        continue;
+      }
+      const ms = legalMoves(s);
+      const places = new Set(placeableCells(s).map((p) => `${p.row},${p.col}`));
+      for (const m of ms) if (m.kind === 'move') expect(places.has(`${m.row},${m.col}`)).toBe(true);
+      const moveOnly = ms.filter((m) => m.kind === 'move');
+      const m: Move =
+        ms.length === 0 ? { kind: 'pass' } : moveOnly.length && r() < 0.3 ? moveOnly[Math.floor(r() * moveOnly.length)] : ms[Math.floor(r() * ms.length)];
+      if (m.kind === 'move') movesSeen++;
+      const snapshot = JSON.stringify(s);
+      const next = applyMove(s, m);
+      expect(JSON.stringify(s)).toBe(snapshot);
+      expect(JSON.parse(JSON.stringify(next))).toEqual(next);
+      s = next;
+      plies++;
+    }
+    expect(movesSeen).toBeGreaterThan(20);
   });
 });

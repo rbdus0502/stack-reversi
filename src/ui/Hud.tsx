@@ -1,4 +1,5 @@
 import type { GameState, Player, Score } from '../engine/types';
+import UnitIcon from './UnitIcon';
 
 interface HudProps {
   state: GameState;
@@ -8,42 +9,49 @@ interface HudProps {
   over: boolean;
 }
 
-function PlayerCard({ p, state, score, name, thinking, over }: {
+function PlayerCard({ p, state, score, name, thinking, active }: {
   p: Player;
   state: GameState;
   score: Score;
   name: string;
   thinking: boolean;
-  over: boolean;
+  active: boolean;
 }) {
-  const active = !over && state.turn === p;
-  const total = state.config.STACK_TOKENS;
-  const left = state.tokens[p];
+  const cfg = state.config;
+  const tickets = state.moveTickets[p];
+  const specials = Object.entries(cfg.UNITS).filter(([, d]) => d.supply !== null);
   return (
     <div className={`pcard${active ? ' active' : ''}`} aria-current={active}>
       <div className="pcard-head">
-        <span className={`chip disc-${p}`} aria-hidden />
+        <span className={`chip side-${p}`} aria-hidden />
         <span className="pname">{name}</span>
         {thinking && <span className="thinking">생각 중…</span>}
       </div>
       <div className="pstats">
         <div className="stat">
-          <span className="stat-v">{score.cells[p]}</span>
-          <span className="stat-k">칸</span>
+          <span className="stat-v">{score.pieces[p]}</span>
+          <span className="stat-k">말</span>
         </div>
         <div className="stat">
-          <span className="stat-v">{score.heights[p]}</span>
-          <span className="stat-k">층 합</span>
+          <span className="stat-v">{score.hp[p]}</span>
+          <span className="stat-k">HP 합</span>
         </div>
       </div>
-      <div className="tokens" aria-label={`겹치기 토큰 ${left}개 남음`}>
-        <span className="tokens-k">토큰</span>
+      <div className="prow" aria-label={`이동권 ${tickets}개 남음`}>
+        <span className="prow-k">이동</span>
         <span className="pips">
-          {Array.from({ length: total }, (_, i) => (
-            <span key={i} className={`pip${i < left ? ' on' : ''}`} />
+          {Array.from({ length: cfg.MOVE_TICKETS }, (_, i) => (
+            <span key={i} className={`pip${i < tickets ? ' on' : ''}`} />
           ))}
         </span>
-        <span className="tokens-v">{left}</span>
+      </div>
+      <div className="prow reserve" aria-label="남은 특수 유닛">
+        {specials.map(([id, d]) => (
+          <span key={id} className={`res${state.supply[p][id] ? '' : ' none'}`} title={d.name}>
+            <UnitIcon unit={id} name={d.name} className="res-icon" />
+            {state.supply[p][id]}
+          </span>
+        ))}
       </div>
     </div>
   );
@@ -60,7 +68,7 @@ export default function Hud({ state, score, names, thinking, over }: HudProps) {
           score={score}
           name={names[p]}
           thinking={thinking === p}
-          over={over}
+          active={!over && state.turn === p}
         />
       ))}
     </div>

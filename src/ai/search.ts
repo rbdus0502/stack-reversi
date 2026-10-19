@@ -1,4 +1,4 @@
-import { applyMove, isGameOver, legalMoves, moveEffect } from '../engine/rules';
+import { applyUnchecked, isGameOver, legalMoves } from '../engine/rules';
 import type { GameState, Move } from '../engine/types';
 import { DEFAULT_WEIGHTS, evaluate, terminalValue, type Weights } from './evaluate';
 
@@ -7,7 +7,7 @@ export type Difficulty = 'easy' | 'normal' | 'hard';
 export const DIFFICULTY_DEPTH: Record<Difficulty, number> = {
   easy: 1,
   normal: 3,
-  hard: 5,
+  hard: 4,
 };
 
 export interface SearchOptions {
@@ -29,16 +29,20 @@ function movesOf(state: GameState): Move[] {
   return moves.length > 0 ? moves : [{ kind: 'pass' }];
 }
 
-/** Cheap ordering: corners first, then moves that change more stacks. */
-function orderMoves(state: GameState, moves: Move[]): Move[] {
+/** Cheap static ordering: corners first, X-squares last, moves after places (DESIGN.md 9-2). */
+function orderKey(state: GameState, m: Move): number {
+  if (m.kind === 'pass') return 0;
   const last = state.board.length - 1;
-  const key = (m: Move) => {
-    if (m.kind === 'pass') return 0;
-    const e = moveEffect(state, m);
-    const corner = (m.row === 0 || m.row === last) && (m.col === 0 || m.col === last) ? 100 : 0;
-    return corner + e.flips.length * 2 + e.shaves.length;
-  };
-  return moves.map((m) => [key(m), m] as const).sort((a, b) => b[0] - a[0]).map(([, m]) => m);
+  const er = m.row === 0 || m.row === last;
+  const ec = m.col === 0 || m.col === last;
+  let k = er && ec ? 100 : er || ec ? 10 : 0;
+  if ((m.row === 1 || m.row === last - 1) && (m.col === 1 || m.col === last - 1)) k -= 30;
+  if (m.kind === 'move') k -= 5;
+  return k;
+}
+
+function ordered(state: GameState, moves: Move[]): Move[] {
+  return moves.map((m) => [orderKey(state, m), m] as const).sort((a, b) => b[0] - a[0]).map(([, m]) => m);
 }
 
 export function search(state: GameState, opts: SearchOptions): SearchResult {
@@ -46,9 +50,9 @@ export function search(state: GameState, opts: SearchOptions): SearchResult {
   const rng = opts.rng ?? Math.random;
   let nodes = 0;
 
-  const root = orderMoves(state, movesOf(state));
+  const all = movesOf(state);
   if (opts.randomness && rng() < opts.randomness) {
-    return { move: root[Math.floor(rng() * root.length)], value: 0, nodes: 0 };
+    return { move: all[Math.floor(rng() * all.length)], value: 0, nodes: 0 };
   }
 
   // Negamax with alpha-beta. Value is always from the side-to-move's view.
@@ -57,8 +61,8 @@ export function search(state: GameState, opts: SearchOptions): SearchResult {
     if (isGameOver(s)) return terminalValue(s, s.turn);
     if (depth === 0) return evaluate(s, s.turn, w);
     let best = -Infinity;
-    for (const m of orderMoves(s, movesOf(s))) {
-      const v = -negamax(applyMove(s, m), depth - 1, -beta, -alpha);
+    for (const m of ordered(s, movesOf(s))) {
+      const v = -negamax(applyUnchecked(s, m), depth - 1, -beta, -alpha);
       if (v > best) best = v;
       if (v > alpha) alpha = v;
       if (alpha >= beta) break;
@@ -66,12 +70,19 @@ export function search(state: GameState, opts: SearchOptions): SearchResult {
     return best;
   };
 
+  // Root: order by a one-ply look so alpha-beta prunes well below.
+  const children = all.map((m) => {
+    const next = applyUnchecked(state, m);
+    return { m, next, quick: isGameOver(next) ? -terminalValue(next, next.turn) : -evaluate(next, next.turn, w) };
+  });
+  children.sort((a, b) => b.quick - a.quick);
+
   let bestMoves: Move[] = [];
   let bestValue = -Infinity;
   let alpha = -Infinity;
-  for (const m of root) {
+  for (const { m, next, quick } of children) {
     // Window lets equal values through exactly so ties can be broken randomly.
-    const v = -negamax(applyMove(state, m), opts.depth - 1, -Infinity, -alpha + 1);
+    const v = opts.depth <= 1 ? quick : -negamax(next, opts.depth - 1, -Infinity, -alpha + 1);
     if (v > bestValue) {
       bestValue = v;
       bestMoves = [m];
@@ -80,7 +91,6 @@ export function search(state: GameState, opts: SearchOptions): SearchResult {
     }
     if (v > alpha) alpha = v;
   }
-  // Break ties randomly so games vary.
   const move = bestMoves[Math.floor(rng() * bestMoves.length)];
   return { move, value: bestValue, nodes };
 }

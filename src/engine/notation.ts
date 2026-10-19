@@ -1,3 +1,4 @@
+import type { RuleConfig } from './config';
 import type { Move } from './types';
 
 const FILES = 'abcdefghijklmnopqrstuvwxyz';
@@ -12,8 +13,9 @@ export function fromNotation(s: string): { row: number; col: number } {
   return { row: Number(m[2]) - 1, col: FILES.indexOf(m[1]) };
 }
 
-export function moveToString(move: Move): string {
+export function moveToString(move: Move, config: RuleConfig): string {
   if (move.kind === 'pass') return '패스';
-  const sq = toNotation(move.row, move.col);
-  return move.kind === 'stack' ? `${sq}↑` : sq;
+  const to = toNotation(move.row, move.col);
+  if (move.kind === 'move') return `${toNotation(move.fromRow, move.fromCol)}→${to}`;
+  return `${config.UNITS[move.unit]?.name ?? move.unit} ${to}`;
 }

@@ -1,36 +1,39 @@
-import type { RuleConfig } from './config';
+import type { RuleConfig, UnitId } from './config';
 
 export type Player = 'B' | 'W';
 
-export interface Stack {
+/** A unit piece (unit set, hp >= 1) or a token (unit null, hp 0). */
+export interface Piece {
   owner: Player;
-  height: number;
+  unit: UnitId | null;
+  hp: number;
 }
 
-export type Cell = Stack | null;
+export type Cell = Piece | null;
+
+export interface Pos {
+  row: number;
+  col: number;
+}
 
 export type Move =
-  | { kind: 'place'; row: number; col: number }
-  | { kind: 'stack'; row: number; col: number }
+  | { kind: 'place'; unit: UnitId; row: number; col: number }
+  | { kind: 'move'; fromRow: number; fromCol: number; row: number; col: number }
   | { kind: 'pass' };
 
 export interface GameState {
   board: Cell[][];
   turn: Player;
-  tokens: Record<Player, number>;
-  /** Number of consecutive passes just played (2 ends the game). */
+  /** Remaining placements per unit. null = unlimited. */
+  supply: Record<Player, Record<UnitId, number | null>>;
+  moveTickets: Record<Player, number>;
+  /** Consecutive passes just played (2 ends the game). */
   passes: number;
   config: RuleConfig;
 }
 
-/** What happens to each sandwiched stack when a move is applied. */
-export interface MoveEffect {
-  flips: { row: number; col: number }[];
-  shaves: { row: number; col: number }[];
-}
-
 export interface Score {
-  cells: Record<Player, number>;
-  heights: Record<Player, number>;
+  pieces: Record<Player, number>;
+  hp: Record<Player, number>;
   winner: Player | 'draw';
 }
